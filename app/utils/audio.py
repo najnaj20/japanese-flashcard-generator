@@ -2,30 +2,61 @@ import yt_dlp
 import whisper
 import os
 import logging
+import warnings
+import torch
 import tempfile
+from datetime import datetime
+import random
+
+warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.modules.lazy")
+warnings.filterwarnings("ignore", message=".*torch.classes.*")
 
 class AudioProcessor:
-    def __init__(self, temp_dir="data/temp"):
+    def __init__(self, temp_dir="data/temp", model_type="base"):
         self.temp_dir = temp_dir
         os.makedirs(temp_dir, exist_ok=True)
-        self.logger = logging.getLogger(__name__)
+        self.logger = self._setup_logger()
+        self.setup_whisper_model(model_type)
+
+    def _setup_logger(self):
+        logger = logging.getLogger(__name__)
+        logger.setLevel(logging.INFO)
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+        return logger
+
+    def setup_whisper_model(self, model_type):
         try:
-            self.logger.info("Loading Whisper model...")
-            self.model = whisper.load_model("base")
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.logger.info(f"Using device: {self.device}")
+            self.model = whisper.load_model(model_type, device=self.device)
             self.logger.info("Whisper model loaded successfully")
         except Exception as e:
             self.logger.error(f"Error loading Whisper model: {str(e)}")
             raise
 
     def download_youtube_audio(self, url):
-        """Download audio from YouTube URL with enhanced error handling and options"""
-        output_path = os.path.join(self.temp_dir, "audio.mp3")
+        output_path = os.path.join(self.temp_dir, f"audio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3")
         
-        # Create a temporary cookie file
-        cookie_path = os.path.join(tempfile.gettempdir(), 'youtube_cookies.txt')
-        
+        # List of free proxy servers (update these with working proxies)
+        proxies = [
+            'http://proxy1.example.com:8080',
+            'http://proxy2.example.com:8080',
+            # Add more proxies here
+        ]
+
+        # Rotate User-Agents
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:100.0) Gecko/20100101 Firefox/100.0',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Safari/605.1.15'
+        ]
+
         ydl_opts = {
-            'format': 'bestaudio[ext=m4a]/bestaudio/best',  # Changed format selection
+            'format': 'bestaudio[ext=m4a]/bestaudio/best',
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
@@ -34,100 +65,104 @@ class AudioProcessor:
             'outtmpl': output_path.replace('.mp3', ''),
             'nocheckcertificate': True,
             'ignoreerrors': False,
+            'no_warnings': True,
             'quiet': False,
-            'no_warnings': False,
-            'extract_audio': True,
-            'audioformat': 'mp3',
-            'socket_timeout': 30,  # Increased timeout
-            'retries': 10,  # Increased retries
+            'socket_timeout': 30,
+            'retries': 10,
             'fragment_retries': 10,
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'User-Agent': random.choice(user_agents),
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-us,en;q=0.5',
-                'Sec-Fetch-Mode': 'navigate',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'DNT': '1',
+                'Connection': 'keep-alive',
             },
-            'cookiefile': cookie_path,  # Use cookie file
-            'verbose': True,  # Enable verbose output for debugging
+            'geo_bypass': True,
+            'geo_bypass_country': 'US',
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web'],  # Try different clients
+                    'skip': ['hls', 'dash'],  # Skip problematic formats
+                }
+            }
         }
 
-        try:
-            self.logger.info(f"Attempting to download audio from: {url}")
+        download_methods = [
+            # Method 1: Direct download
+            lambda: self._try_download(ydl_opts, url),
             
-            # Create empty cookie file if it doesn't exist
-            if not os.path.exists(cookie_path):
-                with open(cookie_path, 'w') as f:
-                    f.write('')
+            # Method 2: With proxy
+            lambda: self._try_download({**ydl_opts, 'proxy': random.choice(proxies)}, url),
             
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                try:
-                    # Try first method
-                    info = ydl.extract_info(url, download=True)
-                except Exception as e:
-                    self.logger.warning(f"First attempt failed: {str(e)}")
-                    # Try alternative format if first attempt fails
-                    ydl_opts['format'] = 'worstaudio/worst'
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
-                        info = ydl2.extract_info(url, download=True)
-                
-                if info is None:
-                    raise Exception("Failed to extract video information")
-                
-                # Get the final filepath
-                final_path = output_path.replace('.mp3', '') + '.mp3'
-                if not os.path.exists(final_path):
-                    raise Exception(f"Downloaded file not found at {final_path}")
-                
-                self.logger.info(f"Successfully downloaded audio to {final_path}")
-                return final_path
+            # Method 3: Different format
+            lambda: self._try_download({**ydl_opts, 'format': 'worstaudio/worst'}, url),
+            
+            # Method 4: Using cookies
+            lambda: self._try_download_with_cookies(ydl_opts, url),
+            
+            # Method 5: Using external downloader
+            lambda: self._try_download({
+                **ydl_opts,
+                'external_downloader': 'aria2c',
+                'external_downloader_args': ['--min-split-size=1M', '--max-connection-per-server=16']
+            }, url)
+        ]
 
-        except Exception as e:
-            self.logger.error(f"Download error: {str(e)}")
-            # Try alternative method with different options
+        last_error = None
+        for method in download_methods:
             try:
-                self.logger.info("Trying alternative download method...")
-                alternative_opts = ydl_opts.copy()
-                alternative_opts['format'] = 'bestaudio[acodec^=opus]/bestaudio/best'
-                alternative_opts['external_downloader'] = 'aria2c'
-                
-                with yt_dlp.YoutubeDL(alternative_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    final_path = output_path.replace('.mp3', '') + '.mp3'
-                    if os.path.exists(final_path):
-                        return final_path
-                    
-            except Exception as e2:
-                self.logger.error(f"Alternative method also failed: {str(e2)}")
-                raise Exception(f"All download attempts failed: {str(e)} | {str(e2)}")
+                result = method()
+                if result and os.path.exists(result):
+                    self.logger.info(f"Successfully downloaded audio to {result}")
+                    return result
+            except Exception as e:
+                last_error = e
+                self.logger.warning(f"Download method failed: {str(e)}")
+                continue
+
+        raise Exception(f"All download methods failed. Last error: {str(last_error)}")
+
+    def _try_download(self, opts, url):
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if info is None:
+                raise Exception("Failed to extract video information")
+            return opts['outtmpl'] + '.mp3'
+
+    def _try_download_with_cookies(self, opts, url):
+        cookie_path = os.path.join(tempfile.gettempdir(), 'youtube_cookies.txt')
+        try:
+            # Create empty cookie file
+            with open(cookie_path, 'w') as f:
+                f.write('')
+            
+            opts['cookiefile'] = cookie_path
+            return self._try_download(opts, url)
         finally:
-            # Cleanup cookie file
             if os.path.exists(cookie_path):
-                try:
-                    os.remove(cookie_path)
-                except:
-                    pass
+                os.remove(cookie_path)
 
     def transcribe_audio(self, audio_path):
-        """Transcribe audio file to text with error handling"""
         try:
             self.logger.info(f"Starting transcription of {audio_path}")
             
             if not os.path.exists(audio_path):
                 raise FileNotFoundError(f"Audio file not found: {audio_path}")
             
-            file_size = os.path.getsize(audio_path)
-            if file_size == 0:
-                raise Exception("Audio file is empty")
-            
-            result = self.model.transcribe(audio_path)
+            result = self.model.transcribe(
+                audio_path,
+                task="transcribe",
+                temperature=0,
+                best_of=1,
+                beam_size=1,
+                patience=1
+            )
             
             if not result or 'text' not in result:
                 raise Exception("Transcription failed - no text generated")
             
             transcribed_text = result['text'].strip()
-            if not transcribed_text:
-                raise Exception("Transcription resulted in empty text")
-            
             self.logger.info("Transcription completed successfully")
             return transcribed_text
 
@@ -136,7 +171,6 @@ class AudioProcessor:
             raise
 
     def cleanup(self):
-        """Clean up temporary files"""
         try:
             for file in os.listdir(self.temp_dir):
                 file_path = os.path.join(self.temp_dir, file)
@@ -144,6 +178,6 @@ class AudioProcessor:
                     if os.path.isfile(file_path):
                         os.unlink(file_path)
                 except Exception as e:
-                    self.logger.error(f"Error deleting {file_path}: {str(e)}")
+                    self.logger.warning(f"Error deleting {file_path}: {str(e)}")
         except Exception as e:
             self.logger.error(f"Error during cleanup: {str(e)}")

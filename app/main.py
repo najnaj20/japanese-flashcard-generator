@@ -1,6 +1,8 @@
 import streamlit as st
 import logging
 import pandas as pd
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
