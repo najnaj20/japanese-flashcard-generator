@@ -1,43 +1,81 @@
-import fugashi
-from typing import List
-import pandas as pd
+# app/utils/vocabulary.py
 
-class VocabularyExtractor:
+from sudachipy import dictionary, tokenizer
+import logging
+from typing import List, Dict
+
+class VocabularyProcessor:
     def __init__(self):
-        self.tagger = fugashi.Tagger()
+        """
+        Inisialisasi VocabularyProcessor dengan Sudachi tokenizer
+        """
+        self.logger = logging.getLogger(__name__)
+        try:
+            self.tokenizer_obj = dictionary.Dictionary().create()
+            self.mode = tokenizer.Tokenizer.SplitMode.C  # Mode paling detail
+        except Exception as e:
+            self.logger.error(f"Error initializing Sudachi: {str(e)}")
+            raise
 
-    def extract_vocabulary(self, text: str) -> pd.DataFrame:
-        # Tokenize the text
-        words = self.tagger(text)
+    def extract_vocabulary(self, text: str) -> List[Dict[str, str]]:
+        """
+        Ekstrak kosakata dari teks Jepang menggunakan Sudachi
         
-        # Extract relevant words (nouns, verbs, adjectives)
-        vocabulary = []
-        seen_words = set()
-        
-        for word in words:
-            # Get base form and parts of speech
-            base_form = word.feature.lemma if word.feature.lemma else word.surface
-            pos = word.feature.pos1
+        Args:
+            text (str): Teks Jepang yang akan diproses
             
-            # Filter for content words and skip duplicates
-            if (pos in ['名詞', '動詞', '形容詞'] and  # noun, verb, adjective
-                base_form not in seen_words and
-                len(base_form) > 1):  # skip single characters
+        Returns:
+            List[Dict[str, str]]: List dari dictionary berisi informasi kosakata
+        """
+        try:
+            vocabulary = []
+            tokens = self.tokenizer_obj.tokenize(text, self.mode)
+            
+            for token in tokens:
+                # Skip token yang bukan kata bermakna
+                if token.part_of_speech()[0] in ['補助記号', '助詞', '助動詞']:
+                    continue
                 
-                vocabulary.append({
-                    'word': base_form,
-                    'reading': word.feature.kana,
-                    'pos': pos
-                })
-                seen_words.add(base_form)
-        
-        return pd.DataFrame(vocabulary)
+                word_info = {
+                    'surface': token.surface(),  # Bentuk yang muncul di teks
+                    'base': token.dictionary_form(),  # Bentuk dasar kata
+                    'pos': token.part_of_speech()[0],  # Jenis kata
+                    'reading': token.reading_form()  # Cara baca
+                }
+                
+                # Hanya tambahkan kata yang memiliki bentuk dasar
+                if word_info['base'] and word_info['surface']:
+                    vocabulary.append(word_info)
+            
+            self.logger.info(f"Extracted {len(vocabulary)} vocabulary items")
+            return vocabulary
+            
+        except Exception as e:
+            self.logger.error(f"Error extracting vocabulary: {str(e)}")
+            raise
 
-    def get_readings(self, word: str) -> str:
-        """Get reading for a Japanese word"""
-        word_tokens = self.tagger(word)
-        readings = []
-        for token in word_tokens:
-            reading = token.feature.kana if token.feature.kana else token.surface
-            readings.append(reading)
-        return ''.join(readings)
+    def get_word_details(self, word: str) -> Dict[str, str]:
+        """
+        Dapatkan informasi detail tentang sebuah kata
+        
+        Args:
+            word (str): Kata yang akan dianalisis
+            
+        Returns:
+            Dict[str, str]: Dictionary berisi informasi kata
+        """
+        try:
+            tokens = self.tokenizer_obj.tokenize(word, self.mode)
+            if tokens:
+                token = tokens[0]
+                return {
+                    'word': token.surface(),
+                    'reading': token.reading_form(),
+                    'pos': token.part_of_speech()[0],
+                    'base': token.dictionary_form()
+                }
+            return {}
+            
+        except Exception as e:
+            self.logger.error(f"Error getting word details: {str(e)}")
+            raise
